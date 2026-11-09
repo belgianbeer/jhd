@@ -25,6 +25,8 @@ static char rcsid[] =
 
 #include  <stdio.h>
 #include  <ctype.h>
+#include  <stdlib.h>
+#include  <string.h>
 #include  <unistd.h>
 
 #define  BSIZE      16384       /*  input buffer size */
@@ -42,10 +44,10 @@ static char rcsid[] =
 #define  KSHIFT      0x8e       /*  JAE kana shift in  */
 
 #if  OS9
-#	define  EXSTAT   0
-#	define  isatty(n)  (_gs_size(n) == -1)
+#define  EXSTAT   0
+#define  isatty(n)  (_gs_size(n) == -1)
 #else
-#	define  EXSTAT   1
+#define  EXSTAT   1
 #endif
 
 #if   LSI
@@ -73,26 +75,63 @@ int     Vflag = 0;              /*  visual option  */
 	extern unsigned char    _osmajor;    /*  MS-DOS version number  */
 #endif
 
+/*
+ *  function prototypes
+ *  (iskanji/iskanji2/iskana/iskana2 are declared together with their
+ *   definitions below, since they may also be provided as system macros)
+ */
+void     set_ttype(void);
+char    *kindex(register char *s, register int c);
+void     putspc(register int n);
+void     putoct(register long n, int w);
+void     puthex(register long n, int w);
+int      chksame(register unsigned char *new, register unsigned char *old,
+                 register int n);
+void     dmpkanji(register unsigned char *base, register int size);
+#if  EUC
+void     dmpkana(unsigned char *base, int size);
+#else
+void     dmpkana(register unsigned char *base, register int size);
+#endif
+void     dmpascii(register unsigned char *base, register int size);
+void     octdmp0(register unsigned char *base, register int size);
+void     octdmp1(register unsigned char *base, register int size,
+                 register int adr);
+void     octdmp2(register unsigned char *base, register int size);
+void     hexdmp(register unsigned char *base, register int size,
+                register int adr);
+void     dmpmode(register unsigned char *buf, register int size,
+                 register int adv);
+void     dmpall(register unsigned char *buf, register int size);
+void     setlast(register unsigned char *ptr);
+void     dmpmain(void);
+char    *setname(register char *path);
+void     usage(void);
+void     toobig(void);
+void     no_open(char *name);
+void     skipread(FILE *fp);
+void     skipfile(FILE *fp);
+void     chkofst(register char *p);
+
 #if  EUC
 
 int     Kskip = 0;
 
 #ifdef  iskanji
-#	undef  iskanji
+#undef  iskanji
 #endif
 #ifdef  iskanji2
-#	undef  iskanji2
+#undef  iskanji2
 #endif
 #ifdef iskana
-#	undef  iskana
+#undef  iskana
 #endif
 #ifdef iskana2
-#	undef  iskana2
+#undef  iskana2
 #endif
 
 int
-iskanji(c)
-    register int    c;
+iskanji(register int c)
 {
 	c &= 0xff;
 	return (c >= 0xa1 && c <= 0xfe);
@@ -101,8 +140,7 @@ iskanji(c)
 #define  iskana(c)	(c == KSHIFT)
 
 int
-iskana2(c)
-    register int     c;
+iskana2(register int c)
 {
 	c &= 0xff;
 	return (c >= 0xa1 && c <= 0xdf);
@@ -114,8 +152,7 @@ iskana2(c)
  *   for kanji kana mode
  */
 #ifndef  iskanji
-int    iskanji(c)
-register int    c;
+int    iskanji(register int c)
 {
 	c &= 0xff;
 	return (c >= 0x81 && c <= 0x9f || c >= 0xe0 && c <= 0xfc);
@@ -123,8 +160,7 @@ register int    c;
 #endif
 
 #ifndef  iskanji2
-int    iskanji2(c)
-    register int    c;
+int    iskanji2(register int c)
 {
 	c &= 0xff;
 	return (c >= 0x40 && c <= 0x7e || c >= 0x80 && c <= 0xfc);
@@ -132,8 +168,7 @@ int    iskanji2(c)
 #endif
 
 #ifndef  iskana
-int    iskana(c)
-register int    c;
+int    iskana(register int c)
 {
 	c &= 0xff;
 	return (c >= 0xa1 && c <= 0xdf);
@@ -146,10 +181,9 @@ register int    c;
  *  set_ttype - check terminal type
  */
 void
-set_ttype ()
+set_ttype(void)
 {
 #if  UNIX || OS9
-	char   *getenv ();
 	char   *p;
 
 	if ((p = getenv ("TTYPE")) == NULL) {
@@ -174,9 +208,7 @@ set_ttype ()
  *  c in string s, or zero if c does not occur in  the string.
  *  checks at shift-JIS code.
  */
-char   *kindex(s, c)
-register char   *s;
-register int     c;
+char   *kindex(register char *s, register int c)
 {
 	while (*s) {
 		if (*s == c) {
@@ -190,17 +222,14 @@ register int     c;
 	return NULL;
 }
 
-void putspc (n)
-register int     n;
+void putspc(register int n)
 {
 	while (n--) {
 		putchar (' ');
 	}
 }
 
-void putoct (n, w)
-register long   n;
-int    w;
+void putoct(register long n, int w)
 {
 	register int     c;
 
@@ -212,9 +241,7 @@ int    w;
 }
 
 void
-puthex (n, w)
-register long   n;
-int    w;
+puthex(register long n, int w)
 {
 	register int     c;
 
@@ -229,10 +256,8 @@ int    w;
 /*
  *  chksame - check n byte same data
  */
-int    chksame(new, old, n)
-register unsigned char   *new;
-register unsigned char   *old;
-register int     n;
+int    chksame(register unsigned char *new,
+               register unsigned char *old, register int n)
 {
 	if (old == NULL) {
 		return 0;
@@ -251,9 +276,7 @@ register int     n;
  *  dmpkanji - dump in kanji with JAE-Kanji
  */
 void
-dmpkanji (base, size)
-register unsigned char   *base;
-register int     size;
+dmpkanji(register unsigned char *base, register int size)
 {
 	register int    c;
 
@@ -286,9 +309,7 @@ register int     size;
 }
 
 void
-dmpkana (base, size)
-unsigned char   *base;
-int     size;
+dmpkana(unsigned char *base, int size)
 {
 	/*  not called in EUC  */
 }
@@ -299,9 +320,7 @@ int     size;
  *  dmpkanji - dump in kanji with Shift-JIS
  */
 void
-dmpkanji (base, size)
-register unsigned char   *base;
-register int     size;
+dmpkanji(register unsigned char *base, register int size)
 {
 	register int    c;
 
@@ -330,9 +349,7 @@ register int     size;
  *  dmpkana - dump in hankaku katakana
  */
 void
-dmpkana (base, size)
-register unsigned char   *base;
-register int     size;
+dmpkana(register unsigned char *base, register int size)
 {
 	register int     c;
 
@@ -353,9 +370,7 @@ register int     size;
  *  dmpascii - dump in ascii charactor
  */
 void
-dmpascii (base, size)
-register unsigned char   *base;
-register int     size;
+dmpascii(register unsigned char *base, register int size)
 {
 	register int     c;
 
@@ -374,9 +389,7 @@ register int     size;
  *  octdmp0 - dump octal in word
  */
 void
-octdmp0 (base, size)
-register unsigned char   *base;
-register int     size;
+octdmp0(register unsigned char *base, register int size)
 {
 	while (size > 0) {
 		putchar (' ');
@@ -390,10 +403,7 @@ register int     size;
  *  octdmp1 - dump octal in byte
  */
 void
-octdmp1 (base, size, adr)
-register unsigned char   *base;
-register int     size;
-register int     adr;
+octdmp1(register unsigned char *base, register int size, register int adr)
 {
 	while (size--) {
 		putchar (' ');
@@ -408,9 +418,7 @@ register int     adr;
  *  octdmp2 - dump octal in reverse word
  */
 void
-octdmp2 (base, size)
-register unsigned char   *base;
-register int     size;
+octdmp2(register unsigned char *base, register int size)
 {
 	while (size > 0) {
 		putchar (' ');
@@ -424,10 +432,7 @@ register int     size;
  * hdmp - dump hexdecimal
  */
 void
-hexdmp (base, size, adr)
-register unsigned char   *base;
-register int     size;
-register int     adr;
+hexdmp(register unsigned char *base, register int size, register int adr)
 {
 	while (size--) {
 		putchar (' ');
@@ -439,10 +444,7 @@ register int     adr;
 }
 
 void
-dmpmode (buf, size, adv)
-register unsigned char   *buf;
-register int     size;
-register int     adv;
+dmpmode(register unsigned char *buf, register int size, register int adv)
 {
 	Putast = 0;
 #if  EUC
@@ -550,9 +552,7 @@ register int     adv;
 }
 
 void
-dmpall (buf, size)
-register unsigned char   *buf;
-register int     size;
+dmpall(register unsigned char *buf, register int size)
 {
 	register int     ss;
 
@@ -646,8 +646,7 @@ register int     size;
 }
 
 void
-setlast (ptr)
-register unsigned char   *ptr;
+setlast(register unsigned char *ptr)
 {
 	register int    n;
 	register unsigned char  *bp;
@@ -663,7 +662,7 @@ register unsigned char   *ptr;
  *  dump file
  */
 void
-dmpmain ()
+dmpmain(void)
 {
 	register int     size;
 
@@ -687,8 +686,7 @@ dmpmain ()
 /*
  *  setname return a tail name of path
  */
-char   *setname(path)
-register char   *path;
+char   *setname(register char *path)
 {
 	register char   *pt;
 
@@ -718,7 +716,7 @@ register char   *path;
 }
 
 void
-usage ()
+usage(void)
 {
 	fputs ("Usage: ", stderr);
 	fputs (Prgnam, stderr);
@@ -731,7 +729,7 @@ usage ()
 }
 
 void
-toobig ()
+toobig(void)
 {
 	fputs (Prgnam, stderr);
 	fputs (": Offset too large!\n", stderr);
@@ -739,8 +737,7 @@ toobig ()
 }
 
 void
-no_open (name)
-char   *name;
+no_open(char *name)
 {
 	fputs (Prgnam, stderr);
 	fputs (": ", stderr);
@@ -750,8 +747,7 @@ char   *name;
 }
 
 void
-skipread (fp)
-FILE   *fp;
+skipread(FILE *fp)
 {
 	register long   offset;
 
@@ -771,8 +767,7 @@ FILE   *fp;
 }
 
 void
-skipfile (fp)
-FILE   *fp;
+skipfile(FILE *fp)
 {
 	if (fseek(fp, Offset & ~(Dwidth - 1), 0) != 0) {
 		toobig ();
@@ -781,10 +776,8 @@ FILE   *fp;
 }
 
 void
-chkofst (p)
-register char   *p;
+chkofst(register char *p)
 {
-	long    atol();
 	register unsigned     c;
 
 	if (*p == 'x' || *p == 'X') {
@@ -818,10 +811,8 @@ register char   *p;
 	}
 }
 
-void
-main (argc, argv)
-int     argc;
-char  **argv;
+int
+main(int argc, char **argv)
 {
 #if  UNIX || OS9
 	Prgnam = setname(*argv);
