@@ -11,210 +11,249 @@
  *        little bug fix in octal-word.
  *      Feb. 23, 1989  Ver. 2.2
  *        correct offset, file is stdin.
+ *      Nov.  9, 2026
+ *        ISO C (ANSI) style at last: prototypes instead of K&R definitions,
+ *        static internal objects and functions, size_t/off_t instead of
+ *        int/long, strtoll() instead of atol().
+ *        The OS-9 (Motorola MC6809) and the LSI-C (MS-DOS) ports are gone:
+ *        jhd is now built for POSIX environments only.
  */
-static char rcsid[] =
-	"@(#)$Id: jhd.c,v 2.4 1999/01/27 03:30:30 minmin Exp $";
+/*  not static, so that the id string stays in the image  */
+char rcsid[] =
+	"@(#)$Id: jhd.c,v 2.4 1999-01-27 03:30:30 minmin Exp $";
+
 /*
- *  definition of System type
+ *  definition of the Kanji code
+ *	EUC	1	EUC-JP		(default)
+ *		0	Shift-JIS
+ *  It can also be set from the command line: cc -DEUC=0 ...
  */
-#define  UNIX    1        /*  in UNIX  */
-#define  OS9     0        /*  in OS9 68000 */
-#define  LSI     0        /*  in LSI-C  */
+#ifndef  EUC
+#define  EUC     1
+#endif
 
-#define  EUC     1        /*  if set, kanji code is EUC (Shift-JIS default)  */
+/*
+ *  NORETURN - tell the compiler that a function never comes back
+ */
+#if  defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+#define  NORETURN   _Noreturn
+#elif  defined(__GNUC__)
+#define  NORETURN   __attribute__((__noreturn__))
+#else
+#define  NORETURN
+#endif
 
-#include  <stdio.h>
+#include  <sys/types.h>		/*  off_t, size_t  */
 #include  <ctype.h>
+#include  <errno.h>
+#include  <limits.h>		/*  LLONG_MAX  */
+#include  <stdio.h>
 #include  <stdlib.h>
 #include  <string.h>
-#include  <unistd.h>
+#include  <unistd.h>		/*  isatty(), fileno(), STDIN_FILENO  */
 
-#define  BSIZE      16384       /*  input buffer size */
+#define  BSIZE      16384		/*  input buffer size  */
+#define  LWIDTH         64		/*  widest dump line, in char mode  */
 
-#define  T_ASCII        0       /*  ascii terminal  */
-#define  T_KANA         1       /*  kana terminal  */
-#define  T_KANJI        2       /*  kanji terminal  */
+#define  T_ASCII         0		/*  ascii terminal  */
+#define  T_KANA          1		/*  kana terminal  */
+#define  T_KANJI         2		/*  kanji terminal  */
 
-#define  HEXDMP         0       /*  dump in hexdecimal  */
-#define  CHRDMP         1       /*  dump in charactor  */
-#define  OCTDMP         2       /*  dump in octal word  */
-#define  OCTBYT         3       /*  dump in octal byte  */
-#define  OCTREV         4       /*  dump in octal reverse  */
+#define  HEXDMP          0		/*  dump in hexdecimal  */
+#define  CHRDMP          1		/*  dump in charactor  */
+#define  OCTDMP          2		/*  dump in octal word  */
+#define  OCTBYT          3		/*  dump in octal byte  */
+#define  OCTREV          4		/*  dump in octal reverse  */
 
-#define  KSHIFT      0x8e       /*  JAE kana shift in  */
+#define  KSHIFT      0x8e		/*  JAE kana shift in  */
 
-#if  OS9
-#define  EXSTAT   0
-#define  isatty(n)  (_gs_size(n) == -1)
-#else
-#define  EXSTAT   1
-#endif
+static unsigned char	Buf[BSIZE];	/*  input buffer  */
+static unsigned char	Tbuf[LWIDTH];	/*  copy of the last dumped line  */
+static const unsigned char *Lbuf;	/*  last Dwidth bytes dumped  */
 
-#if   LSI
-	unsigned char    Ibuf[BSIZE];
-#endif
-
-unsigned char    Buf[BSIZE];             /*  input buffer  */
-unsigned char    Tbuf[64];
-unsigned char   *Lbuf = NULL;            /*  last 16 byte  */
-
-char   *Prgnam = "jhd";
-long    Offset;                 /*  dump offset  */
-long    Addr;                   /*  current address  */
-int     Bsize = BSIZE;
-int     Admode = 0;             /*  address display mode  */
-FILE   *Fp;                     /*  file pointer  */
-int     Ttype;                  /*  terminal type  */
-int     Skip = 0;               /*  skip next data  (kanji2 printed)  */
-int     Dwidth = 16;            /*  dump width in byte  */
-int     Putast;                 /*  '*' display flag  */
-int     Mode = HEXDMP;          /*  dump mode  */
-int     Vflag = 0;              /*  visual option  */
-
-#if  LSI
-	extern unsigned char    _osmajor;    /*  MS-DOS version number  */
+static const char	*Prgnam = "jhd";
+static off_t		Offset;		/*  dump offset  */
+static off_t		Addr;		/*  current address  */
+static off_t		Dwidth = 16;	/*  dump width in byte  */
+static int		Admode;		/*  address display mode  */
+static FILE		*Fp;		/*  file pointer  */
+static int		Ttype;		/*  terminal type  */
+static int		Skip;		/*  skip next data (kanji2 printed)  */
+static int		Putast;		/*  '*' display flag  */
+static int		Mode = HEXDMP;	/*  dump mode  */
+static int		Vflag;		/*  visual option  */
+#if  EUC
+static int		Kskip;		/*  skip next data (kana2 printed)  */
 #endif
 
 /*
  *  function prototypes
- *  (iskanji/iskanji2/iskana/iskana2 are declared together with their
- *   definitions below, since they may also be provided as system macros)
  */
-void     set_ttype(void);
-char    *kindex(register char *s, register int c);
-void     putspc(register int n);
-void     putoct(register long n, int w);
-void     puthex(register long n, int w);
-int      chksame(register unsigned char *new, register unsigned char *old,
-                 register int n);
-void     dmpkanji(register unsigned char *base, register int size);
+static int		iskanji(int c);
 #if  EUC
-void     dmpkana(unsigned char *base, int size);
+static int		iskana2(int c);
 #else
-void     dmpkana(register unsigned char *base, register int size);
+static int		iskanji2(int c);
+static int		iskana(int c);
 #endif
-void     dmpascii(register unsigned char *base, register int size);
-void     octdmp0(register unsigned char *base, register int size);
-void     octdmp1(register unsigned char *base, register int size,
-                 register int adr);
-void     octdmp2(register unsigned char *base, register int size);
-void     hexdmp(register unsigned char *base, register int size,
-                register int adr);
-void     dmpmode(register unsigned char *buf, register int size,
-                 register int adv);
-void     dmpall(register unsigned char *buf, register int size);
-void     setlast(register unsigned char *ptr);
-void     dmpmain(void);
-char    *setname(register char *path);
-void     usage(void);
-void     toobig(void);
-void     no_open(char *name);
-void     skipread(FILE *fp);
-void     skipfile(FILE *fp);
-void     chkofst(register char *p);
+static void		set_ttype(void);
+static const char	*kindex(const char *s, int c);
+static void		putspc(int n);
+static void		putnum(unsigned long long value, int shift, int width);
+static void		putoct(unsigned long long value, int width);
+static void		puthex(unsigned long long value, int width);
+static void		putaddr(void);
+static int		chksame(const unsigned char *cur,
+			    const unsigned char *old, int n);
+static void		dmpkanji(const unsigned char *base, int size);
+static void		dmpkana(const unsigned char *base, int size);
+static void		dmpascii(const unsigned char *base, int size);
+static void		dmptext(const unsigned char *base, int size);
+static void		octdmp0(const unsigned char *base, int size);
+static void		octdmp1(const unsigned char *base, int size, int adr);
+static void		octdmp2(const unsigned char *base, int size);
+static void		hexdmp(const unsigned char *base, int size, int adr);
+static void		putpartial(const unsigned char *buf);
+static void		dmpnl(int how);
+static void		dmpmode(const unsigned char *buf, int size, int adv);
+static void		dmpall(const unsigned char *buf, int size);
+static void		setlast(const unsigned char *ptr);
+static void		dmpmain(void);
+static const char	*setname(const char *path);
+static void		setoption(int opt);
+static NORETURN void	usage(void);
+static NORETURN void	toobig(void);
+static NORETURN void	no_open(const char *name);
+static void		skipread(FILE *fp);
+static void		skipfile(FILE *fp);
+static void		chkofst(const char *p);
+static off_t		linestart(off_t addr);
+static int		parseargs(int argc, char **argv);
 
+/*
+ *  Kanji code recognition.
+ *  The byte reaching these is always read from an unsigned char, so the
+ *  masking is just a guarantee for odd arguments.
+ */
 #if  EUC
 
-int     Kskip = 0;
-
-#ifdef  iskanji
-#undef  iskanji
+#ifdef	iskanji
+#undef	iskanji
 #endif
-#ifdef  iskanji2
-#undef  iskanji2
+#ifdef	iskanji2
+#undef	iskanji2
 #endif
-#ifdef iskana
-#undef  iskana
+#ifdef	iskana2
+#undef	iskana2
 #endif
-#ifdef iskana2
-#undef  iskana2
+#ifdef	iskana
+#undef	iskana
 #endif
 
-int
-iskanji(register int c)
+/*
+ *  iskanji - lead or trail byte of a EUC kanji
+ */
+static int
+iskanji(int c)
 {
 	c &= 0xff;
 	return (c >= 0xa1 && c <= 0xfe);
 }
 
-#define  iskana(c)	(c == KSHIFT)
-
-int
-iskana2(register int c)
+/*
+ *  iskana2 - trail byte of a half width katakana
+ */
+static int
+iskana2(int c)
 {
 	c &= 0xff;
 	return (c >= 0xa1 && c <= 0xdf);
 }
+
+#define	iskana(c)	((c) == KSHIFT)		/*  lead byte  */
 
 #else  /*  EUC  */
 
 /*
  *   for kanji kana mode
  */
-#ifndef  iskanji
-int    iskanji(register int c)
-{
-	c &= 0xff;
-	return (c >= 0x81 && c <= 0x9f || c >= 0xe0 && c <= 0xfc);
-}
+#ifdef	iskanji
+#undef	iskanji
+#endif
+#ifdef	iskanji2
+#undef	iskanji2
+#endif
+#ifdef	iskana
+#undef	iskana
 #endif
 
-#ifndef  iskanji2
-int    iskanji2(register int c)
+/*
+ *  iskanji - lead byte of a Shift-JIS kanji
+ */
+static int
+iskanji(int c)
 {
 	c &= 0xff;
-	return (c >= 0x40 && c <= 0x7e || c >= 0x80 && c <= 0xfc);
+	return (c >= 0x81 && c <= 0x9f) || (c >= 0xe0 && c <= 0xfc);
 }
-#endif
 
-#ifndef  iskana
-int    iskana(register int c)
+/*
+ *  iskanji2 - trail byte of a Shift-JIS kanji
+ */
+static int
+iskanji2(int c)
+{
+	c &= 0xff;
+	return (c >= 0x40 && c <= 0x7e) || (c >= 0x80 && c <= 0xfc);
+}
+
+/*
+ *  iskana - byte of a half width katakana
+ */
+static int
+iskana(int c)
 {
 	c &= 0xff;
 	return (c >= 0xa1 && c <= 0xdf);
 }
-#endif
 
 #endif  /*  EUC  */
 
 /*
  *  set_ttype - check terminal type
  */
-void
+static void
 set_ttype(void)
 {
-#if  UNIX || OS9
-	char   *p;
+	const char	*p;
 
-	if ((p = getenv ("TTYPE")) == NULL) {
+	p = getenv("TTYPE");
+	if (p == NULL) {
 		Ttype = T_ASCII;
-	} else if (!strcmp(p, "mskanji") || !strcmp(p, "jiskanji")) {
+	} else if (strcmp(p, "mskanji") == 0 || strcmp(p, "jiskanji") == 0) {
 		Ttype = T_KANJI;
 #if  EUC == 0
-	} else if (!strcmp(p, "kana")) {
+	} else if (strcmp(p, "kana") == 0) {
 		Ttype = T_KANA;
 #endif
 	} else {
 		Ttype = T_ASCII;
 	}
-#endif  /*  UNIX || OS9  */
-#if  LSI
-	Ttype = T_KANJI;
-#endif
 }
 
 /*
- *  Kindex returns a pointer to the first occurrence of character
- *  c in string s, or zero if c does not occur in  the string.
- *  checks at shift-JIS code.
+ *  kindex returns a pointer to the first occurrence of character
+ *  c in string s, or zero if c does not occur in the string.
+ *  Kanji code is skipped, so that a c inside a kanji is not found.
  */
-char   *kindex(register char *s, register int c)
+static const char *
+kindex(const char *s, int c)
 {
-	while (*s) {
-		if (*s == c) {
+	while (*s != '\0') {
+		if ((unsigned char)*s == (unsigned char)c) {
 			return s;
 		}
-		if (iskanji(*s)) {
+		if (iskanji((unsigned char)*s)) {
 			++s;
 		}
 		++s;
@@ -222,48 +261,74 @@ char   *kindex(register char *s, register int c)
 	return NULL;
 }
 
-void putspc(register int n)
+/*
+ *  putspc - print n blanks
+ */
+static void
+putspc(int n)
 {
-	while (n--) {
-		putchar (' ');
-	}
+	printf("%*s", n, "");
 }
 
-void putoct(register long n, int w)
+/*
+ *  putnum - print the low `width' digits of `value', `shift' bits each
+ */
+static void
+putnum(unsigned long long value, int shift, int width)
 {
-	register int     c;
+	static const char	digits[] = "0123456789ABCDEF";
+	const unsigned long long mask = (1ULL << shift) - 1;
+	char			buf[64];
+	int			i;
 
-	if (w > 1) {
-		putoct (n >> 3, w - 1);
+	if (width < 0 || width >= (int)sizeof(buf)) {
+		width = (int)sizeof(buf) - 1;
 	}
-	c = n & 0x7;
-	putchar (c + '0');
+	i = width;
+	buf[i] = '\0';
+	while (i > 0) {
+		buf[--i] = digits[(size_t)(value & mask)];
+		value >>= shift;
+	}
+	fputs(buf, stdout);
 }
 
-void
-puthex(register long n, int w)
+static void
+putoct(unsigned long long value, int width)
 {
-	register int     c;
+	putnum(value, 3, width);
+}
 
-	if (w > 1) {
-		puthex (n >> 4, w - 1);
+static void
+puthex(unsigned long long value, int width)
+{
+	putnum(value, 4, width);
+}
+
+/*
+ *  putaddr - print the current address, octal or hexdecimal
+ */
+static void
+putaddr(void)
+{
+	if (Admode) {
+		putoct((unsigned long long)Addr, 11);
+	} else {
+		puthex((unsigned long long)Addr, 8);
 	}
-	c = n & 0xf;
-	c += c <= 9 ? '0': '7';
-	putchar (c);
 }
 
 /*
  *  chksame - check n byte same data
  */
-int    chksame(register unsigned char *new,
-               register unsigned char *old, register int n)
+static int
+chksame(const unsigned char *cur, const unsigned char *old, int n)
 {
 	if (old == NULL) {
 		return 0;
 	}
 	while (n--) {
-		if (*new++ != *old++) {
+		if (*cur++ != *old++) {
 			return 0;
 		}
 	}
@@ -275,43 +340,56 @@ int    chksame(register unsigned char *new,
 /*
  *  dmpkanji - dump in kanji with JAE-Kanji
  */
-void
-dmpkanji(register unsigned char *base, register int size)
+static void
+dmpkanji(const unsigned char *base, int size)
 {
-	register int    c;
+	int	c;
 
-	putchar (' ');
+	putchar(' ');
 	while (size--) {
 		c = *base++;
 		if (Skip || Kskip) {
 			Kskip = Skip = 0;
-			putchar (' ');
+			putchar(' ');
 		} else if (size == 0 && iskanji(c)) {
 			Skip = c;
 		} else if (size == 0 && iskana(c)) {
 			Kskip = c;
 		} else if (iskanji(c) && iskanji(*base)) {
-			putchar (c);
-			putchar (*base);
+			putchar(c);
+			putchar(*base);
 			--size;
 			++base;
 		} else if (iskana(c) && iskana2(c)) {
-			putchar (c);
-			putchar (*base);
+			/*  XXX the second test says iskana2(c), which asks
+			 *  the lead byte about the trail range and is there
+			 *  for never true: a KSHIFT pair is displayed as
+			 *  ".." instead of as a half width kana.  Left as
+			 *  the original program behaved;  iskana2(*base)
+			 *  is the fix, but it changes the display.
+			 */
+			putchar(c);
+			putchar(*base);
 			--size;
 			++base;
 		} else if (isprint(c)) {
-			putchar (c);
+			putchar(c);
 		} else {
-			putchar ('.');
+			putchar('.');
 		}
 	}
 }
 
-void
-dmpkana(unsigned char *base, int size)
+/*
+ *  dmpkana - no half width kana mode in EUC
+ */
+/* ARGSUSED */
+static void
+dmpkana(const unsigned char *base, int size)
 {
 	/*  not called in EUC  */
+	(void)base;
+	(void)size;
 }
 
 #else  /*  EUC  */
@@ -319,28 +397,28 @@ dmpkana(unsigned char *base, int size)
 /*
  *  dmpkanji - dump in kanji with Shift-JIS
  */
-void
-dmpkanji(register unsigned char *base, register int size)
+static void
+dmpkanji(const unsigned char *base, int size)
 {
-	register int    c;
+	int	c;
 
-	putchar (' ');
+	putchar(' ');
 	while (size--) {
 		c = *base++;
 		if (Skip) {
 			Skip = 0;
-			putchar (' ');
+			putchar(' ');
 		} else if (size == 0 && iskanji(c)) {
 			Skip = c;
 		} else if (iskanji(c) && iskanji2(*base)) {
-			putchar (c);
-			putchar (*base);
+			putchar(c);
+			putchar(*base);
 			--size;
 			++base;
 		} else if (iskana(c) || isprint(c)) {
-			putchar (c);
+			putchar(c);
 		} else {
-			putchar ('.');
+			putchar('.');
 		}
 	}
 }
@@ -348,18 +426,18 @@ dmpkanji(register unsigned char *base, register int size)
 /*
  *  dmpkana - dump in hankaku katakana
  */
-void
-dmpkana(register unsigned char *base, register int size)
+static void
+dmpkana(const unsigned char *base, int size)
 {
-	register int     c;
+	int	c;
 
-	putchar (' ');
+	putchar(' ');
 	while (size--) {
 		c = *base++;
 		if (isprint(c) || iskana(c)) {
-			putchar (c);
+			putchar(c);
 		} else {
-			putchar ('.');
+			putchar('.');
 		}
 	}
 }
@@ -369,31 +447,50 @@ dmpkana(register unsigned char *base, register int size)
 /*
  *  dmpascii - dump in ascii charactor
  */
-void
-dmpascii(register unsigned char *base, register int size)
+static void
+dmpascii(const unsigned char *base, int size)
 {
-	register int     c;
+	int	c;
 
-	putchar (' ');
+	putchar(' ');
 	while (size--) {
 		c = *base++;
 		if (isprint(c)) {
-			putchar (c);
+			putchar(c);
 		} else {
-			putchar ('.');
+			putchar('.');
 		}
+	}
+}
+
+/*
+ *  dmptext - dump the character column of the terminal in use
+ */
+static void
+dmptext(const unsigned char *base, int size)
+{
+	switch (Ttype) {
+	case T_ASCII:
+		dmpascii(base, size);
+		break;
+	case T_KANA:
+		dmpkana(base, size);
+		break;
+	default:
+		dmpkanji(base, size);
+		break;
 	}
 }
 
 /*
  *  octdmp0 - dump octal in word
  */
-void
-octdmp0(register unsigned char *base, register int size)
+static void
+octdmp0(const unsigned char *base, int size)
 {
 	while (size > 0) {
-		putchar (' ');
-		putoct ((long)((unsigned)(base[0] << 8) + (unsigned)base[1]), 6);
+		putchar(' ');
+		putoct(((unsigned long long)base[0] << 8) + base[1], 6);
 		base += 2;
 		size -= 2;
 	}
@@ -402,14 +499,14 @@ octdmp0(register unsigned char *base, register int size)
 /*
  *  octdmp1 - dump octal in byte
  */
-void
-octdmp1(register unsigned char *base, register int size, register int adr)
+static void
+octdmp1(const unsigned char *base, int size, int adr)
 {
 	while (size--) {
-		putchar (' ');
-		putoct ((long)((unsigned)*base++), 3);
+		putchar(' ');
+		putoct(*base++, 3);
 		if (++adr == 8) {
-			putchar (' ');
+			putchar(' ');
 		}
 	}
 }
@@ -417,241 +514,219 @@ octdmp1(register unsigned char *base, register int size, register int adr)
 /*
  *  octdmp2 - dump octal in reverse word
  */
-void
-octdmp2(register unsigned char *base, register int size)
+static void
+octdmp2(const unsigned char *base, int size)
 {
 	while (size > 0) {
-		putchar (' ');
-		putoct ((long)((unsigned)(base[1] << 8) + (unsigned)base[0]), 6);
+		putchar(' ');
+		putoct(((unsigned long long)base[1] << 8) + base[0], 6);
 		base += 2;
 		size -= 2;
 	}
 }
 
 /*
- * hdmp - dump hexdecimal
+ *  hexdmp - dump hexdecimal
  */
-void
-hexdmp(register unsigned char *base, register int size, register int adr)
+/*
+ *  hexdmp - dump hexdecimal
+ */
+static void
+hexdmp(const unsigned char *base, int size, int adr)
 {
 	while (size--) {
-		putchar (' ');
-		puthex ((long)((unsigned)*base++), 2);
+		putchar(' ');
+		puthex(*base++, 2);
 		if (++adr == 8) {
-			putchar (' ');
+			putchar(' ');
 		}
 	}
 }
 
-void
-dmpmode(register unsigned char *buf, register int size, register int adv)
+/*
+ *  dmpmode - print one dumped line
+ *
+ *  buf	dump starts `adv' bytes before the data to be displayed, because
+ *	the leading half of a kanji may sit on the previous line.
+ *  size	number of bytes to display.
+ */
+static void
+dmpmode(const unsigned char *buf, int size, int adv)
 {
+	int	n;
+
 	Putast = 0;
+	putpartial(buf);
+	putaddr();
+	putchar(' ');
+	buf += adv;
+	n = size + adv;			/*  bytes of this line in the file  */
+	switch (Mode) {
+	case HEXDMP:			/*  hex dump with char column  */
+		putspc(adv * 3 + (adv >= 8 ? 1 : 0));
+		hexdmp(buf, size, adv);
+		putspc((int)(Dwidth - n) * 3 + (n < 8 ? 2 : 1) + adv);
+		dmptext(buf, size);
+		break;
+
+	case CHRDMP:			/*  char dump only  */
+		putspc(adv);
+		dmptext(buf, size);
+		break;
+
+	case OCTDMP:			/*  octal dump in word  */
+		putspc((adv / 2) * 7);
+		octdmp0(buf, size);
+		break;
+
+	case OCTBYT:			/*  octal dump in byte  */
+		putspc(adv * 4 + (adv >= 8 ? 1 : 0));
+		octdmp1(buf, size, adv);
+		break;
+
+	case OCTREV:			/*  octal dump in reverse word  */
+		putspc(adv * 7);
+		octdmp2(buf, size);
+		break;
+	}
+}
+
+/*
+ *  end of line, with the two flavours the kanji code may ask for
+ */
+#define	LINEEND		0		/*  close the line, dot if pending  */
+#define	LINECONT	1		/*  half kanji crosses to next line  */
+#define	LINESKIP	2		/*  repeated data, nothing displayed  */
+
+/*
+ *  dmpnl - terminate a dumped line
+ */
+static void
+dmpnl(int how)
+{
+#if  EUC
+	int	pend = (Skip || Kskip);
+#else
+	int	pend = (Skip != 0);
+#endif
+
+	switch (how) {
+	case LINEEND:
+		if (pend) {
+			putchar('.');
+		}
+		putchar('\n');
+		break;
+	case LINECONT:
+		if (!pend) {
+			putchar('\n');
+		}
+		return;
+	default:			/*  LINESKIP  */
+		if (pend) {
+			putchar('.');
+			putchar('\n');
+		}
+		break;
+	}
+	if (pend) {
+#if  EUC
+		Skip = Kskip = 0;
+#else
+		Skip = 0;
+#endif
+	}
+}
+
+/*
+ *  putpartial - display a kanji or kana whose second byte sits on the
+ *  line that is dumped now
+ */
+static void
+putpartial(const unsigned char *buf)
+{
 #if  EUC
 	if (Kskip) {
 		if (iskana2(*buf)) {
-			putchar (Kskip);
-			putchar (*buf);
-			putchar ('\n');
+			putchar(Kskip);
+			putchar(*buf);
 		} else {
-			putchar ('.');
-			putchar ('\n');
+			putchar('.');
 			Kskip = 0;
 		}
+		putchar('\n');
 	}
+#endif
 	if (Skip) {
+#if  EUC
 		if (iskanji(*buf)) {
-			putchar (Skip);
-			putchar (*buf);
-			putchar ('\n');
-		} else {
-			putchar ('.');
-			putchar ('\n');
-			Skip = 0;
-		}
-	}
-#else  /*  EUC  */
-	if (Skip) {
+#else
 		if (iskanji2(*buf)) {
-			putchar (Skip);
-			putchar (*buf);
-			putchar ('\n');
+#endif
+			putchar(Skip);
+			putchar(*buf);
 		} else {
-			putchar ('.');
-			putchar ('\n');
+			putchar('.');
 			Skip = 0;
 		}
-	}
-#endif  /*  EUC  */
-	if (Admode) {
-		putoct (Addr, 11);
-	} else {
-		puthex (Addr, 8);
-	}
-	putchar (' ');
-	buf += adv;
-	switch (Mode) {
-
-	case 0:  /*  hex dump with ascii */
-		putspc (adv * 3 + (adv >= 8? 1: 0));
-		hexdmp (buf, size, adv);
-		putspc ((Dwidth - (size + adv)) * 3 + ((size + adv) < 8? 2: 1) + adv);
-		dmpascii (buf, size);
-		break;
-
-	case 1:  /*  hex dump with kana */
-		putspc (adv * 3 + (adv >= 8? 1: 0));
-		hexdmp (buf, size, adv);
-		putspc ((Dwidth - (size + adv)) * 3 + ((size + adv) < 8? 2: 1) + adv);
-		dmpkana (buf, size);
-		break;
-	
-	case 2:  /*  hex dump with kanji  */
-		putspc (adv * 3 + (adv >= 8? 1: 0));
-		hexdmp (buf, size, adv);
-		putspc ((Dwidth - (size + adv)) * 3 + ((size + adv) < 8? 2: 1) + adv);
-		dmpkanji (buf, size);
-		break;
-
-	case 3:  /*  char dump in ascii  */
-		putspc (adv);
-		dmpascii (buf, size);
-		break;
-
-	case 4:  /*  char dump in kana  */
-		putspc (adv);
-		dmpkana (buf, size);
-		break;
-
-	case 5:  /*  char dump in kanji  */
-		putspc (adv);
-		dmpkanji (buf, size);
-		break;
-
-	case 6:  /*  octal dump in word  */
-	case 7:
-	case 8:
-		putspc ((adv / 2) * 7);
-		octdmp0 (buf, size);
-		break;
-
-	case 9:  /*  octal dump in byte  */
-	case 10:
-	case 11:
-		putspc (adv * 4 + (adv >= 8? 1: 0));
-		octdmp1 (buf, size, adv);
-		break;
-
-	case 12: /*  octal dump in reverse word  */
-	case 13:
-	case 14:
-		putspc (adv * 7);
-		octdmp2 (buf, size);
-		break;
+		putchar('\n');
 	}
 }
 
-void
-dmpall(register unsigned char *buf, register int size)
+/*
+ *  dmpall - dump a block that was read in
+ */
+static void
+dmpall(const unsigned char *buf, int size)
 {
-	register int     ss;
+	int	first = (int)(Offset - Addr);	/*  bytes to skip, 1st line  */
+	int	width = (int)Dwidth;
 
-	ss = Offset - Addr;
-	if (size < Dwidth) {
-		dmpmode (buf, size - ss, ss);
-#if  EUC
-		if (Kskip || Skip) {
-			putchar ('.');
-			Skip = Kskip = 0;
-		}
-#else
-		if (Skip) {
-			putchar ('.');
-			Skip = 0;
-		}
-#endif
-		putchar ('\n');
+	if (size < width) {
+		dmpmode(buf, size - first, first);
+		dmpnl(LINEEND);
 		Addr += size;
 		return;
 	}
 	if (Addr != Offset) {
-		dmpmode (buf, Dwidth - ss, ss);
-#if  EUC 
-		if (!Skip && !Kskip) {
-			putchar ('\n');
-		}
-#else
-		if (!Skip) {
-			putchar ('\n');
-		}
-#endif
-		Addr += Dwidth;
-		buf += Dwidth;
-		size -= Dwidth;
+		dmpmode(buf, width - first, first);
+		dmpnl(LINECONT);
+		Addr += width;
+		buf += width;
+		size -= width;
 	}
-	while (size >= Dwidth) {
-		if (!Vflag && chksame(buf, Lbuf, Dwidth)) {
+	while (size >= width) {
+		if (!Vflag && chksame(buf, Lbuf, width)) {
 			if (!Putast) {
-#if  EUC
-				if (Skip || Kskip) {
-					putchar ('.');
-					putchar ('\n');
-					Skip = Kskip = 0;
-				}
-#else
-				if (Skip) {
-					putchar ('.');
-					putchar ('\n');
-					Skip = 0;
-				}
-#endif
-				putchar ('*');
-				putchar ('\n');
+				dmpnl(LINESKIP);
+				putchar('*');
+				putchar('\n');
 				Putast = 1;
 			}
 		} else {
-			dmpmode (buf, Dwidth, 0);
-#if  EUC
-			if (!Skip && !Kskip) {
-				putchar ('\n');
-			}
-#else
-			if (!Skip) {
-				putchar ('\n');
-			}
-#endif
+			dmpmode(buf, width, 0);
+			dmpnl(LINECONT);
 		}
 		Lbuf = buf;
-		Addr += Dwidth;
-		buf += Dwidth;
-		size -= Dwidth;
+		Addr += width;
+		buf += width;
+		size -= width;
 	}
 	if (size != 0) {
-		dmpmode (buf, size, 0);
-#if  EUC
-		if (Skip || Kskip) {
-			putchar ('.');
-			Skip = Kskip = 0;
-		}
-#else
-		if (Skip) {
-			putchar ('.');
-			Skip = 0;
-		}
-#endif
+		dmpmode(buf, size, 0);
 		Addr += size;
-		putchar ('\n');
+		dmpnl(LINEEND);
 	}
 	Offset = Addr;
 }
 
-void
-setlast(register unsigned char *ptr)
+static void
+setlast(const unsigned char *ptr)
 {
-	register int    n;
-	register unsigned char  *bp;
+	int	n;
+	unsigned char	*bp;
 
-	n = Dwidth;
+	n = (int)Dwidth;
 	Lbuf = bp = Tbuf;
 	while (n--) {
 		*bp++ = *ptr++;
@@ -661,152 +736,251 @@ setlast(register unsigned char *ptr)
 /*
  *  dump file
  */
-void
+static void
 dmpmain(void)
 {
-	register int     size;
+	size_t	size;
 
-	Mode = Mode * 3 + Ttype;
-	Addr = (Offset & ~(Dwidth - 1));
-	while ((size = fread(Buf, 1, BSIZE, Fp)) != 0) {
-		dmpall (Buf, size);
-		setlast (Buf + size - Dwidth);
+	Addr = linestart(Offset);
+	while ((size = fread(Buf, 1, sizeof(Buf), Fp)) != 0) {
+		dmpall(Buf, (int)size);
+		if (size >= (size_t)Dwidth) {
+			setlast(Buf + size - (size_t)Dwidth);
+		}
 	}
 	if (Putast) {
 		--Addr;
-		if (Admode) {
-			putoct (Addr, 11);
-		} else {
-			puthex (Addr, 8);
-		}
-		putchar ('\n');
+		putaddr();
+		putchar('\n');
 	}
 }
 
 /*
- *  setname return a tail name of path
+ *  setname - return the tail name of a path
  */
-char   *setname(register char *path)
+static const char *
+setname(const char *path)
 {
-	register char   *pt;
+	const char	*pt;
 
 	while ((pt = kindex(path, '/')) != NULL) {
 		path = pt + 1;
 	}
-#if  LSI
-	while ((pt = kindex(path, ':')) != NULL) {
-		path = pt + 1;
-	}
-	while ((pt = kindex(path, '\\')) != NULL) {
-		path = pt + 1;
-	}
-	if (kindex(path, '.') != NULL) {
-		*kindex(path, '.') = '\0';
-	}
-	pt = path;
-	while (*pt) {
-		/* --- program name to lower case --- */
-		if (isupper(*pt)) {
-			*pt += ' ';
-		}
-		++pt;
-	}
-#endif
 	return path;
 }
 
-void
+/*
+ *  setoption - apply one option letter of the command line
+ */
+static void
+setoption(int opt)
+{
+	switch (opt) {
+	case 'b':
+		Mode = OCTBYT;
+		Dwidth = 16;
+		break;
+
+	case 'c':
+		Mode = CHRDMP;
+		Dwidth = LWIDTH;
+		break;
+
+	case 'o':
+		Mode = OCTDMP;
+		Dwidth = 16;
+		break;
+
+	case 'r':
+		Mode = OCTREV;
+		Dwidth = 16;
+		break;
+
+	case 'a':
+		Ttype = T_ASCII;
+		break;
+
+#if  EUC == 0
+	case 'k':
+		Ttype = T_KANA;
+		break;
+#endif
+
+	case 'j':
+		Ttype = T_KANJI;
+		break;
+
+	case 'v':
+		Vflag = 1;
+		break;
+
+	case 'O':
+		Admode = 1;
+		break;
+
+	default:
+		usage();
+	}
+}
+
+/*
+ *  parseargs - pick the options, the offset and the file out of argv.
+ *
+ *  Options are every argument up to the first one that does not begin
+ *  with '-' (a lone "-" means the standard input), and they may be
+ *  clustered, as in "-vjO".  The offset is "+[x|o]<offset>[k]", and it
+ *  may be given either before or after the file name.
+ *
+ *  Returns the index of the file to dump, or 0 when the standard input
+ *  has to be used.  Usage is displayed when there is nothing to dump and
+ *  the standard input is a terminal.
+ */
+static int
+parseargs(int argc, char **argv)
+{
+	int	i;
+	int	file;
+
+	for (i = 1; i < argc; ++i) {
+		const char	*p;
+
+		if (argv[i][0] != '-' || argv[i][1] == '\0') {
+			break;
+		}
+		for (p = argv[i] + 1; *p != '\0'; ++p) {
+			setoption(*p);
+		}
+	}
+	file = i;
+	if (i < argc && argv[i][0] == '+') {
+		chkofst(argv[i] + 1);
+		file = i + 1;
+	} else if (i + 1 < argc && argv[i + 1][0] == '+') {
+		chkofst(argv[i + 1] + 1);
+	}
+	if (file >= argc) {
+		if (isatty(STDIN_FILENO)) {
+			usage();
+		}
+		return 0;
+	}
+	return argv[file][0] == '-' ? 0 : file;
+}
+
+/*
+ *  usage - tell how to run this program
+ */
+static NORETURN void
 usage(void)
 {
-	fputs ("Usage: ", stderr);
-	fputs (Prgnam, stderr);
+	fputs("Usage: ", stderr);
+	fputs(Prgnam, stderr);
 #if  EUC
-	fputs (" [ -abcjorvO ] [ <file> ] [ +[x|o]<offset>[k] ]\n", stderr);
+	fputs(" [ -abcjorvO ] [ <file> ] [ +[x|o]<offset>[k] ]\n", stderr);
 #else
-	fputs (" [ -abcjkorvO ] [ <file> ] [ +[x|o]<offset>[k] ]\n", stderr);
+	fputs(" [ -abcjkorvO ] [ <file> ] [ +[x|o]<offset>[k] ]\n", stderr);
 #endif
-	exit (EXSTAT);
+	exit(EXIT_FAILURE);
 }
 
-void
+/*
+ *  toobig - the offset reaches beyond the data
+ */
+static NORETURN void
 toobig(void)
 {
-	fputs (Prgnam, stderr);
-	fputs (": Offset too large!\n", stderr);
-	exit (EXSTAT);
+	fputs(Prgnam, stderr);
+	fputs(": Offset too large!\n", stderr);
+	exit(EXIT_FAILURE);
 }
 
-void
-no_open(char *name)
+static NORETURN void
+no_open(const char *name)
 {
-	fputs (Prgnam, stderr);
-	fputs (": ", stderr);
-	fputs (name, stderr);
-	fputs (": can't open.\n", stderr);
-	exit (EXSTAT);
+	fputs(Prgnam, stderr);
+	fputs(": ", stderr);
+	fputs(name, stderr);
+	fputs(": can't open.\n", stderr);
+	exit(EXIT_FAILURE);
 }
 
-void
+/*
+ *  skipread - walk the stream up to the offset, reading it
+ *
+ *  Used for input that cannot be seeked (a terminal or a pipe); the data
+ *  in front of the offset is read into the buffer and dropped.
+ */
+static void
 skipread(FILE *fp)
 {
-	register long   offset;
+	off_t	offset;
 
-	if (Offset == 0L) {
+	if (Offset == 0) {
 		return;
 	}
-	offset = Offset & ~(Dwidth - 1);
-	while (offset > (long)BSIZE) {
-		if (fread(Buf, 1, BSIZE, fp) < BSIZE) {
-			toobig ();
+	offset = linestart(Offset);
+	while (offset > (off_t)sizeof(Buf)) {
+		if (fread(Buf, 1, sizeof(Buf), fp) != sizeof(Buf)) {
+			toobig();
 		}
-		offset -= BSIZE;
+		offset -= (off_t)sizeof(Buf);
 	}
-	if (fread(Buf, 1, (int)offset, fp) < (int)offset) {
-		toobig ();
+	if (fread(Buf, 1, (size_t)offset, fp) != (size_t)offset) {
+		toobig();
 	}
 }
 
-void
+/*
+ *  skipfile - seek the file to the offset
+ */
+static void
 skipfile(FILE *fp)
 {
-	if (fseek(fp, Offset & ~(Dwidth - 1), 0) != 0) {
-		toobig ();
-		/* --- not reached --- */
+	if (fseeko(fp, linestart(Offset), SEEK_SET) != 0) {
+		toobig();
 	}
 }
 
-void
-chkofst(register char *p)
+/*
+ *  linestart - the address of the dump line that holds addr
+ *
+ *  Dwidth is a power of two, so this rounds down without a division.
+ */
+static off_t
+linestart(off_t addr)
 {
-	register unsigned     c;
+	return addr - (addr & (Dwidth - 1));
+}
+
+/*
+ *  chkofst - decode "+..." into Offset
+ *
+ *  x/X selects hexdecimal, o/O or a leading 0 selects octal, decimal else;
+ *  a trailing k multiplies by 1024.
+ */
+static void
+chkofst(const char *p)
+{
+	char		*end;
+	long long	value;
+	int		basesize = 10;
 
 	if (*p == 'x' || *p == 'X') {
-		Offset = 0;
+		basesize = 16;
 		++p;
-		c = (unsigned)*p++;
-		while (isxdigit(c)) {
-			if (isdigit(c)) {
-				Offset = (Offset << 4) + (c - '0');
-			} else {
-				Offset = (Offset << 4) +
-				       ((islower(c)? toupper(c): c) - 'A' + 10);
-			}
-			c = (unsigned)*p++;
-		}
-	} else if (*p == 'o' || *p == 'O' || *p == '0') {
-		Offset = 0;
+	} else if (*p == 'o' || *p == 'O') {
+		basesize = 8;
 		++p;
-		while (isdigit(*p)) {
-			Offset = ((Offset << 3) & ~7L) + ((*p - '0') & 7);
-			++p;
-		}
-	} else {
-		Offset = atol(p);
-		while (isdigit(*p)) {
-			++p;
-		}
+	} else if (*p == '0') {
+		basesize = 8;
 	}
-	if (Offset && (*p == 'K' || *p == 'k')) {
+	errno = 0;
+	value = strtoll(p, &end, basesize);
+	if (errno == ERANGE || value < 0 || value > LLONG_MAX >> 10) {
+		toobig();
+	}
+	Offset = (off_t)value;
+	if (Offset && (*end == 'K' || *end == 'k')) {
 		Offset <<= 10;
 	}
 }
@@ -814,112 +988,30 @@ chkofst(register char *p)
 int
 main(int argc, char **argv)
 {
-#if  UNIX || OS9
-	Prgnam = setname(*argv);
-#endif
-#if  LSI
-	if (_osmajor > 2) {
-		/* --- MS-DOS version 3.xx or later --- */
-		Prgnam = setname(*argv);
-	}
-#endif
+	int	file;
+
+	Prgnam = setname(argv[0]);
 	set_ttype();
-	while (--argc && **++argv == '-' && *(*argv + 1) != '\0') {
-		while (*++*argv) switch (**argv) {
-
-		case 'b':
-			Mode = OCTBYT;
-			Dwidth = 16;
-			continue;
-
-		case 'c':
-			Mode = CHRDMP;
-			Dwidth = 64;
-			continue;
-
-		case 'o':
-			Mode = OCTDMP;
-			Dwidth = 16;
-			continue;
-
-		case 'r':
-			Mode = OCTREV;
-			Dwidth = 16;
-			continue;
-
-		case 'a':
-			Ttype = T_ASCII;
-			continue;
-#if  EUC == 0
-		case 'k':
-			Ttype = T_KANA;
-			continue;
-#endif
-		case 'j':
-			Ttype = T_KANJI;
-			continue;
-
-		case 'v':
-			Vflag = 1;
-			continue;
-
-		case 'O':
-			Admode = 1;
-			continue;
-
-		default:
-			usage ();
-		}
-	}
-	++argc;
-	--argv;
-	if (argc > 1 && argv[1][0] == '+') {
-		chkofst (argv[1] + 1);
-		--argc;
-		++argv;
-	} else if (argc > 2 && argv[2][0] == '+') {
-		chkofst (argv[2] + 1);
-	}
-	if (argc == 1 && isatty(fileno(stdin))) {
-		usage ();
-		/* --- not reached --- */
-	}
-	if (argc == 1 || (argc > 1 && **(argv + 1) == '-')) {
+	file = parseargs(argc, argv);
+	if (file == 0) {			/*  the standard input  */
 		Fp = stdin;
-#if  LSI
-		Fp->mode |= _BINARY;
-		setvbuf (Fp, Ibuf, _IOFBF, BSIZE);
-#endif
-		skipread (stdin);
-		dmpmain ();
-		exit (0);
+		skipread(Fp);
+		dmpmain();
+		return 0;
 	}
-	--argc;
-#if  OS9
-	if ((Fp = fopen(*++argv, "r")) == NULL && (Fp = fopen(*argv, "d")) == NULL)
-#endif
-#if  LSI 
-	if ((Fp = fopen(*++argv, "rb")) == NULL)
-#endif
-#if  UNIX
-	if ((Fp = fopen(*++argv, "r")) == NULL)
-#endif
-	{
-		no_open(*argv);
-		/* --- not reached --- */
+	Fp = fopen(argv[file], "r");
+	if (Fp == NULL) {
+		no_open(argv[file]);
 	}
-	if (argc > 1 && argv[1][0] == '+') {
-		chkofst (argv[1] + 1);
+	if (file + 1 < argc && argv[file + 1][0] == '+') {
+		chkofst(argv[file + 1] + 1);
 	}
-#if  LSI
-	setvbuf (Fp, Ibuf, _IOFBF, BSIZE);
-#endif
 	if (isatty(fileno(Fp))) {
-		skipread (Fp);
+		skipread(Fp);
 	} else {
-		skipfile (Fp);
+		skipfile(Fp);
 	}
-	dmpmain ();
-	fclose (Fp);
-	exit (0);
+	dmpmain();
+	fclose(Fp);
+	return 0;
 }
