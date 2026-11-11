@@ -1,5 +1,7 @@
 jhd
 *.o
+CVS
+.cvsignore
 hoge*
 fuga*
 test*

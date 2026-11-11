@@ -1,8 +1,7 @@
 /*
  *  Jhd - Japanese Hexdecimal Dump
  *
- *    Written by Masato Minda
- *               minmin@strauss.uec.junet
+ *    Written by Masato Minda <minmin@wide.ad.jp>
  *
  *    Created Sep. 11, 1986  Version 1.0
  *            Sep. 14, 1988  Version 2.0
@@ -11,7 +10,7 @@
  *        little bug fix in octal-word.
  *      Feb. 23, 1989  Ver. 2.2
  *        correct offset, file is stdin.
- *      Nov.  9, 2026
+ *      Nov. 10, 2026
  *        ISO C (ANSI) style at last: prototypes instead of K&R definitions,
  *        static internal objects and functions, size_t/off_t instead of
  *        int/long, strtoll() instead of atol().
@@ -20,7 +19,7 @@
  */
 /*  not static, so that the id string stays in the image  */
 char rcsid[] =
-	"@(#)$Id: jhd.c,v 2.4 1999-01-27 03:30:30 minmin Exp $";
+	"@(#)$Id: jhd.c,v 3.0 2026/11/10 07:43:55 minmin Exp $";
 
 /*
  *  definition of the Kanji code
