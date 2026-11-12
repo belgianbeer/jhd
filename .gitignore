@@ -1,6 +1,7 @@
 jhd
 *.o
 CVS
+.vscode
 .cvsignore
 hoge*
 fuga*

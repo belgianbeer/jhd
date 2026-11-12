@@ -10,16 +10,24 @@
  *        little bug fix in octal-word.
  *      Feb. 23, 1989  Ver. 2.2
  *        correct offset, file is stdin.
- *      Nov. 10, 2026
+ *      Nov. 10, 2026  Ver. 3.0
  *        ISO C (ANSI) style at last: prototypes instead of K&R definitions,
  *        static internal objects and functions, size_t/off_t instead of
  *        int/long, strtoll() instead of atol().
  *        The OS-9 (Motorola MC6809) and the LSI-C (MS-DOS) ports are gone:
  *        jhd is now built for POSIX environments only.
+ *      Nov. 12, 2026  Ver. 3.1
+ *        Fixed an old bug:  a dump line ending with the first half of a kanji
+ *        had its newline held back until the second half could be printed at
+ *        the head of the next line, so data that ended exactly on a line
+ *        boundary -- a multiple of 16 bytes, or of 64 with -c -- lost its
+ *        final line break.  dmpmain() now ends a pending half with "." and a
+ *        newline.  Only the hexdecimal and charactor dumps, in the kanji
+ *        terminal mode, can wait for a second half;  in EUC any byte of
+ *        0xa1-0xfe, whether it leads or trails, and the kana shift 0x8e do.
  */
 /*  not static, so that the id string stays in the image  */
-char rcsid[] =
-	"@(#)$Id: jhd.c,v 3.0 2026/11/10 07:43:55 minmin Exp $";
+char rcsid[] = "@(#)$Id: jhd.c,v 3.1 2026/11/12 12:56:54 minmin Exp $";
 
 /*
  *  definition of the Kanji code
@@ -359,14 +367,8 @@ dmpkanji(const unsigned char *base, int size)
 			putchar(*base);
 			--size;
 			++base;
-		} else if (iskana(c) && iskana2(c)) {
-			/*  XXX the second test says iskana2(c), which asks
-			 *  the lead byte about the trail range and is there
-			 *  for never true: a KSHIFT pair is displayed as
-			 *  ".." instead of as a half width kana.  Left as
-			 *  the original program behaved;  iskana2(*base)
-			 *  is the fix, but it changes the display.
-			 */
+		} else if (iskana(c) && iskana2(*base)) {
+			/*  a KSHIFT (SS2) and a byte of the half width kana  */
 			putchar(c);
 			putchar(*base);
 			--size;
@@ -682,6 +684,9 @@ dmpall(const unsigned char *buf, int size)
 	int	width = (int)Dwidth;
 
 	if (size < width) {
+		if (size < first) {
+			first = size;	/*  the offset sits past the end  */
+		}
 		dmpmode(buf, size - first, first);
 		dmpnl(LINEEND);
 		Addr += size;
@@ -750,6 +755,14 @@ dmpmain(void)
 	if (Putast) {
 		--Addr;
 		putaddr();
+		putchar('\n');
+	}
+#if  EUC
+	if (Skip || Kskip) {
+#else
+	if (Skip) {
+#endif
+		putchar('.');		/*  1st half kanji at last data */
 		putchar('\n');
 	}
 }
